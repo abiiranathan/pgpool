@@ -1,11 +1,11 @@
 prefix=@CMAKE_INSTALL_PREFIX@
 exec_prefix=${prefix}
-libdir=@CMAKE_INSTALL_FULL_LIBDIR@
-includedir=@CMAKE_INSTALL_FULL_INCLUDEDIR@
+libdir=${exec_prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
 
 Name: pgpool
 Description: PostgreSQL connection pool library
 Version: @PROJECT_VERSION@
 Requires: libpq
-Libs: -L${libdir} -lpgpool -lpthread
-Cflags: -I${includedir}
+Libs: -L${libdir} -lpgpool
+Cflags: -I${includedir}/pgpool
