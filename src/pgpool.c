@@ -575,6 +575,14 @@ bool pgpool_execute(pgconn_t* conn, const char* query, int timeout_ms) {
     return true;
 }
 
+bool pgpool_execute_params(pgconn_t* conn, const char* query, int n_params, const char* const* param_values,
+                           int timeout_ms) {
+    PGresult* res = pgpool_query_params(conn, query, n_params, param_values, timeout_ms);
+    if (!res) return false;
+    PQclear(res);
+    return true;
+}
+
 PGresult* pgpool_query_params(pgconn_t* conn, const char* query, int n_params, const char* const* param_values,
                               int timeout_ms) {
     if (!conn || !query) return NULL;
