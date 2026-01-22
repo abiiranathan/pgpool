@@ -25,9 +25,11 @@ find_package(Threads REQUIRED)
 # ------------------------------------------------------------
 # Library
 # ------------------------------------------------------------
-add_library(pgpool
-    src/pgpool.c
-)
+add_library(pgpool src/pgpool.c src/pgtypes.c)
+
+if(WIN32)
+    target_sources(pgpool PRIVATE src/win_strptime.c)
+endif()
 
 add_library(pgpool::pgpool ALIAS pgpool)
 
@@ -75,6 +77,9 @@ if(MSVC)
     target_compile_definitions(pgpool PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
     target_compile_options(pgpool PRIVATE -Wall -Wextra -pedantic)
+
+    # Enables strptime posix function.
+    target_compile_definitions(pgpool PRIVATE _XOPEN_SOURCE=700)
 endif()
 
 # ------------------------------------------------------------
