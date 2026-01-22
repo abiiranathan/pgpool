@@ -1,0 +1,12 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Find dependencies
+find_dependency(PostgreSQL REQUIRED)
+find_dependency(Threads REQUIRED)
+
+# Include the targets file
+include("${CMAKE_CURRENT_LIST_DIR}/pgpoolTargets.cmake")
+
+check_required_components(pgpool)
