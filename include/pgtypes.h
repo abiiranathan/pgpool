@@ -3,22 +3,10 @@
 
 #include <libpq-fe.h>
 #include <limits.h>
+#include <solidc/xtime.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-
-#if defined(__APPLE__) || defined(__unix__) || defined(__linux__)
-#include <sys/time.h>  // for gettimeofday
-#endif
-
-#if defined(__APPLE__)
-#include <mach/mach_time.h>
-#endif
-
-#if defined(_MSC_VER)
-    #include "win_strptime.h"
-#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -144,7 +132,7 @@ const unsigned char* pg_get_binary(PGresult* res, int row, int col, size_t* leng
 const char* pg_get_uuid(PGresult* res, int row, int col, bool* valid);
 
 /**
- * @brief Retrieve a timestamp value from a PGresult and convert it to a struct timespec.
+ * @brief Retrieve a timestamp value from a PGresult and convert it to xtime_t.
  *
  * Supports multiple PostgreSQL timestamp formats, including ISO 8601.
  *
@@ -152,9 +140,9 @@ const char* pg_get_uuid(PGresult* res, int row, int col, bool* valid);
  * @param row   Row index in the result set.
  * @param col   Column index in the result set.
  * @param valid Optional pointer to a bool that will be set to true if the timestamp was parsed successfully.
- * @return      A struct timespec with the parsed timestamp. On failure, returns {0, 0}.
+ * @return      A struct xtime_t with the parsed timestamp and timezone info. On failure, returns {0, 0}.
  */
-struct timespec pg_get_timestamp(PGresult* res, int row, int col, bool* valid);
+xtime_t pg_get_timestamp(PGresult* res, int row, int col, bool* valid);
 
 #ifdef __cplusplus
 }

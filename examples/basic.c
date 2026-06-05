@@ -1,14 +1,14 @@
-#include "../include/pgpool.h"
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include "../include/pgpool.h"
+#include "../include/pgtypes.h"
 
 // Global pool for signal handler access
-static pgpool_t* g_pool = NULL;
+static pgpool_t* g_pool                         = NULL;
 static volatile sig_atomic_t shutdown_requested = 0;
 
 /**
@@ -51,9 +51,11 @@ static void* worker_thread(void* arg) {
         PGresult* res = pgpool_query(conn, "SELECT pg_sleep(1)", 2000);
         if (res) {
             PQclear(res);
-            printf("[Worker %d] Query %d/%d completed\n", args->worker_id, i + 1, args->sleep_seconds);
+            printf("[Worker %d] Query %d/%d completed\n", args->worker_id, i + 1,
+                   args->sleep_seconds);
         } else {
-            fprintf(stderr, "[Worker %d] Query failed: %s\n", args->worker_id, pgpool_error_message(conn));
+            fprintf(stderr, "[Worker %d] Query failed: %s\n", args->worker_id,
+                    pgpool_error_message(conn));
             break;
         }
     }
@@ -83,13 +85,13 @@ static void test_forced_shutdown(const char* conninfo) {
     signal(SIGTERM, signal_handler);
 
     pgpool_config_t config = {
-      .conninfo = conninfo,
-      .min_connections = 2,
-      .max_connections = 5,
-      .connect_timeout = 5,
-      .auto_reconnect = true,
-      .connection_init = NULL,
-      .connection_close = NULL,
+        .conninfo         = conninfo,
+        .min_connections  = 2,
+        .max_connections  = 5,
+        .connect_timeout  = 5,
+        .auto_reconnect   = true,
+        .connection_init  = NULL,
+        .connection_close = NULL,
     };
 
     g_pool = pgpool_create(&config);
@@ -103,12 +105,12 @@ static void test_forced_shutdown(const char* conninfo) {
     // Create workers with different behaviors
     pthread_t threads[3];
     worker_args_t worker_args[3] = {
-      // Worker 0: Works for 3 seconds, releases normally
-      {.pool = g_pool, .worker_id = 0, .sleep_seconds = 3, .release_connection = true},
-      // Worker 1: Works for 10 seconds, releases normally (might timeout)
-      {.pool = g_pool, .worker_id = 1, .sleep_seconds = 10, .release_connection = true},
-      // Worker 2: Works for 5 seconds, NEVER releases (simulates bug)
-      {.pool = g_pool, .worker_id = 2, .sleep_seconds = 5, .release_connection = false},
+        // Worker 0: Works for 3 seconds, releases normally
+        {.pool = g_pool, .worker_id = 0, .sleep_seconds = 3, .release_connection = true},
+        // Worker 1: Works for 10 seconds, releases normally (might timeout)
+        {.pool = g_pool, .worker_id = 1, .sleep_seconds = 10, .release_connection = true},
+        // Worker 2: Works for 5 seconds, NEVER releases (simulates bug)
+        {.pool = g_pool, .worker_id = 2, .sleep_seconds = 5, .release_connection = false},
     };
 
     for (int i = 0; i < 3; i++) {
@@ -119,7 +121,8 @@ static void test_forced_shutdown(const char* conninfo) {
     sleep(2);
 
     printf("\nPool status:\n");
-    printf("  Idle: %zu, Active: %zu\n", pgpool_idle_connections(g_pool), pgpool_active_connections(g_pool));
+    printf("  Idle: %zu, Active: %zu\n", pgpool_idle_connections(g_pool),
+           pgpool_active_connections(g_pool));
 
     // Simulate either user pressing Ctrl+C or automatic shutdown after 6 seconds
     printf("\nWaiting for shutdown signal or 6 second timeout...\n");
@@ -165,13 +168,13 @@ int main(int argc, char* argv[]) {
 
     // Configure the pool
     pgpool_config_t config = {
-      .conninfo = conninfo,
-      .min_connections = 2,
-      .max_connections = 10,
-      .connect_timeout = 5,
-      .auto_reconnect = true,
-      .connection_init = NULL,
-      .connection_close = NULL,
+        .conninfo         = conninfo,
+        .min_connections  = 2,
+        .max_connections  = 10,
+        .connect_timeout  = 5,
+        .auto_reconnect   = true,
+        .connection_init  = NULL,
+        .connection_close = NULL,
     };
 
     // Create the pool
@@ -211,7 +214,7 @@ int main(int argc, char* argv[]) {
     // Test parameterized query
     printf("\n--- Testing Parameterized Query ---\n");
     const char* params[] = {"test_value"};
-    res = pgpool_query_params(conn, "SELECT $1::text as value", 1, params, 5000);
+    res                  = pgpool_query_params(conn, "SELECT $1::text as value", 1, params, 5000);
     if (res) {
         // No need to check status - already verified
         printf("Returned value: %s\n", PQgetvalue(res, 0, 0));
@@ -226,7 +229,7 @@ int main(int argc, char* argv[]) {
         printf("Statement prepared successfully\n");
 
         const char* sum_params[] = {"10", "20"};
-        res = pgpool_execute_prepared(conn, "test_stmt", 2, sum_params, 5000);
+        res                      = pgpool_execute_prepared(conn, "test_stmt", 2, sum_params, 5000);
         if (res) {
             // No need to check status - already verified
             printf("Sum result: %s\n", PQgetvalue(res, 0, 0));
@@ -249,6 +252,22 @@ int main(int argc, char* argv[]) {
         } else {
             printf("Transaction commit failed\n");
         }
+    }
+
+    // Select created_at from users table
+    res = pgpool_query(conn, "SELECT created_at FROM users LIMIT 10", -1);
+    if (res) {
+        int n = PQntuples(res);
+        printf("Users: %d\n", n);
+        bool valid;
+        for (int i = 0; i < n; i++) {
+            char buf[64];
+            const char* val = PQgetvalue(res, i, 0);
+            xtime_t dt      = pg_get_timestamp(res, i, 0, &valid);
+            xtime_format(&dt, XTIME_FMT_POSTGRES_TZ, buf, sizeof(buf));
+            printf("Formatted: %s, Original: %s\n", buf, val);
+        }
+        PQclear(res);
     }
 
     // Release connection back to pool

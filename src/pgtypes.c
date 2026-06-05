@@ -1,4 +1,5 @@
 #include "pgtypes.h"
+#include <solidc/xtime.h>
 
 // Get an integer value from a PGresult at the specified row and column.
 // Sets *valid to true if successful, false if the value is null or invalid.
@@ -106,8 +107,8 @@ bool pg_get_bool(PGresult* res, int row, int col, bool* valid) {
     if (valid) *valid = true;
     // PostgreSQL boolean: 't'/'f', 'true'/'false', '1'/'0', 'yes'/'no', 'on'/'off'
     char first = val[0];
-    return (first == 't' || first == 'T' || first == '1' || first == 'y' || first == 'Y' || first == 'o' ||
-            first == 'O');
+    return (first == 't' || first == 'T' || first == '1' || first == 'y' || first == 'Y' ||
+            first == 'o' || first == 'O');
 }
 
 // Get a string value from a PGresult at the specified row and column.
@@ -132,7 +133,7 @@ size_t pg_get_string_buf(PGresult* res, int row, int col, char* buf, size_t buf_
     }
 
     const char* val = PQgetvalue(res, row, col);
-    size_t len = strlen(val);
+    size_t len      = strlen(val);
     size_t copy_len = (len >= buf_size) ? buf_size - 1 : len;
 
     memcpy(buf, val, copy_len);
@@ -172,70 +173,20 @@ const char* pg_get_uuid(PGresult* res, int row, int col, bool* valid) {
 }
 
 // Get a timestamp as a string.
-struct timespec pg_get_timestamp(PGresult* res, int row, int col, bool* valid) {
+xtime_t pg_get_timestamp(PGresult* res, int row, int col, bool* valid) {
     const char* s = pg_get_string(res, row, col, valid);
     if ((valid && !*valid) || !s) {
         if (valid) *valid = false;
-        return (struct timespec){0, 0};
+        return (xtime_t){0};
     }
 
-    struct timespec ts = {0, 0};
-    struct tm tm = {0};
-    char* end = NULL;
-
-    // Try different PostgreSQL timestamp formats
-    const char* formats[] = {
-      "%Y-%m-%d %H:%M:%S",    // Standard format
-      "%Y-%m-%d %H:%M:%S%z",  // With timezone
-      "%Y-%m-%dT%H:%M:%S",    // ISO 8601 format
-      "%Y-%m-%dT%H:%M:%S%z",  // ISO 8601 with timezone
-    };
-
-    bool parsed = false;
-    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {
-        memset(&tm, 0, sizeof(tm));
-        tm.tm_isdst = -1;  // Let mktime determine DST
-
-        end = strptime(s, formats[i], &tm);
-        if (end) {
-            parsed = true;
-            break;
-        }
-    }
-
-    if (!parsed) {
+    // Initialize timestamp.
+    xtime_t timestamp = {0};
+    xtime_error_t err;
+    err = xtime_parse(s, XTIME_FMT_POSTGRES_TZ, &timestamp);
+    if (err != XTIME_OK) {
         if (valid) *valid = false;
-        return ts;
+        return (xtime_t){0};
     }
-
-    ts.tv_sec = mktime(&tm);
-    if (ts.tv_sec == -1) {
-        if (valid) *valid = false;
-        return ts;
-    }
-
-    // Handle fractional seconds if present
-    if (*end == '.') {
-        end++;
-        char* frac_end;
-        long microseconds = strtol(end, &frac_end, 10);
-
-        if (frac_end > end && microseconds >= 0) {
-            int digits = (int)(frac_end - end);
-
-            while (digits < 6) {
-                microseconds *= 10;
-                digits++;
-            }
-            while (digits > 6) {
-                microseconds /= 10;
-                digits--;
-            }
-
-            ts.tv_nsec = microseconds * 1000;
-        }
-    }
-
-    if (valid) *valid = true;
-    return ts;
+    return timestamp;
 }

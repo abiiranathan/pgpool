@@ -11,6 +11,7 @@
  */
 
 #include <libpq-fe.h>
+#include <solidc/defer.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -71,7 +72,7 @@ pgpool_t* pgpool_create(const pgpool_config_t* config);
  *       as the OS will reclaim all resources. The pool structure itself
  *       is always freed.
  */
-bool pgpool_destroy(pgpool_t* pool,unsigned int timeout_ms);
+bool pgpool_destroy(pgpool_t* pool, unsigned int timeout_ms);
 
 /**
  * Acquire a connection from the pool.
@@ -133,8 +134,8 @@ bool pgpool_execute_params(pgconn_t* conn, const char* query, int n_params,
  * @note Thread-safe: Different threads can prepare different statements
  *       on different connections concurrently.
  */
-bool pgpool_prepare(pgconn_t* conn, const char* stmt_name, const char* query, 
-                    int n_params, int timeout_ms);
+bool pgpool_prepare(pgconn_t* conn, const char* stmt_name, const char* query, int n_params,
+                    int timeout_ms);
 
 /**
  * Execute a previously prepared statement.
@@ -182,6 +183,34 @@ size_t pgpool_active_connections(pgpool_t* pool);
 
 /** Get the number of idle connections in the pool. */
 size_t pgpool_idle_connections(pgpool_t* pool);
+
+#define defer_pqclear(res)  \
+    defer {                 \
+        if ((res)) {        \
+            PQclear((res)); \
+        }                   \
+    }
+
+#define defer_release(pool, conn)           \
+    defer {                                 \
+        if ((conn)) {                       \
+            pgpool_release((pool), (conn)); \
+        }                                   \
+    }
+
+#define defer_deallocate(conn, stmt_name, timeout_ms)             \
+    defer {                                                       \
+        if ((conn)) {                                             \
+            pgpool_deallocate((conn), (stmt_name), (timeout_ms)); \
+        }                                                         \
+    }
+
+#define defer_destroy(pool, timeout_ms)           \
+    defer {                                       \
+        if ((pool)) {                             \
+            pgpool_destroy((pool), (timeout_ms)); \
+        }                                         \
+    }
 
 #ifdef __cplusplus
 }

@@ -18,6 +18,7 @@ option(PGPOOL_BUILD_TESTS "Build test suite" ON)
 # Dependencies
 # ------------------------------------------------------------
 find_package(PostgreSQL REQUIRED)
+find_package(solidc CONFIG REQUIRED)
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
@@ -26,11 +27,6 @@ find_package(Threads REQUIRED)
 # Library
 # ------------------------------------------------------------
 add_library(pgpool src/pgpool.c src/pgtypes.c)
-
-if(WIN32)
-    target_sources(pgpool PRIVATE src/win_strptime.c)
-endif()
-
 add_library(pgpool::pgpool ALIAS pgpool)
 
 # Export symbols on Windows for shared libs
@@ -63,6 +59,7 @@ target_link_libraries(pgpool
     PUBLIC
         ${PostgreSQL_LIBRARIES}
         Threads::Threads
+        solidc::solidc
 )
 
 if(WIN32)
