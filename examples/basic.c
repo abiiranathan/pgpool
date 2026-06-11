@@ -4,11 +4,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>  // for usleep
 #include "../include/pgpool.h"
 #include "../include/pgtypes.h"
 
 // Global pool for signal handler access
-static pgpool_t* g_pool                         = NULL;
+static pgpool_t* g_pool = NULL;
 static volatile sig_atomic_t shutdown_requested = 0;
 
 /**
@@ -51,11 +52,9 @@ static void* worker_thread(void* arg) {
         PGresult* res = pgpool_query(conn, "SELECT pg_sleep(1)", 2000);
         if (res) {
             PQclear(res);
-            printf("[Worker %d] Query %d/%d completed\n", args->worker_id, i + 1,
-                   args->sleep_seconds);
+            printf("[Worker %d] Query %d/%d completed\n", args->worker_id, i + 1, args->sleep_seconds);
         } else {
-            fprintf(stderr, "[Worker %d] Query failed: %s\n", args->worker_id,
-                    pgpool_error_message(conn));
+            fprintf(stderr, "[Worker %d] Query failed: %s\n", args->worker_id, pgpool_error_message(conn));
             break;
         }
     }
@@ -85,12 +84,12 @@ static void test_forced_shutdown(const char* conninfo) {
     signal(SIGTERM, signal_handler);
 
     pgpool_config_t config = {
-        .conninfo         = conninfo,
-        .min_connections  = 2,
-        .max_connections  = 5,
-        .connect_timeout  = 5,
-        .auto_reconnect   = true,
-        .connection_init  = NULL,
+        .conninfo = conninfo,
+        .min_connections = 2,
+        .max_connections = 5,
+        .connect_timeout = 5,
+        .auto_reconnect = true,
+        .connection_init = NULL,
         .connection_close = NULL,
     };
 
@@ -121,8 +120,7 @@ static void test_forced_shutdown(const char* conninfo) {
     sleep(2);
 
     printf("\nPool status:\n");
-    printf("  Idle: %zu, Active: %zu\n", pgpool_idle_connections(g_pool),
-           pgpool_active_connections(g_pool));
+    printf("  Idle: %zu, Active: %zu\n", pgpool_idle_connections(g_pool), pgpool_active_connections(g_pool));
 
     // Simulate either user pressing Ctrl+C or automatic shutdown after 6 seconds
     printf("\nWaiting for shutdown signal or 6 second timeout...\n");
@@ -147,33 +145,200 @@ static void test_forced_shutdown(const char* conninfo) {
     printf("\n=== FORCED SHUTDOWN TEST COMPLETE ===\n");
 }
 
+/* =========================================================================
+ * Multithreaded Transaction Test
+ * ======================================================================= */
+
+typedef struct {
+    pgpool_t* pool;
+    int thread_id;
+    int iterations;
+} tx_worker_args_t;
+
+static void* tx_worker_thread(void* arg) {
+    tx_worker_args_t* args = (tx_worker_args_t*)arg;
+
+    for (int i = 0; i < args->iterations; i++) {
+        pgconn_t* conn = pgpool_acquire(args->pool, 5000);
+        if (!conn) {
+            fprintf(stderr, "[TX Worker %d] Failed to acquire connection\n", args->thread_id);
+            continue;
+        }
+
+        // Begin transaction block
+        if (!pgpool_begin(conn, 5000)) {
+            fprintf(stderr, "[TX Worker %d] BEGIN failed: %s\n", args->thread_id, pgpool_error_message(conn));
+            pgpool_release(args->pool, conn);
+            continue;
+        }
+
+        // Alternate transfer directions based on iteration / thread ID
+        const char* query1;
+        const char* query2;
+        if ((args->thread_id + i) % 2 == 0) {
+            query1 = "UPDATE pgpool_tx_test SET balance = balance - 10 WHERE id = 1";
+            query2 = "UPDATE pgpool_tx_test SET balance = balance + 10 WHERE id = 2";
+        } else {
+            query1 = "UPDATE pgpool_tx_test SET balance = balance - 10 WHERE id = 2";
+            query2 = "UPDATE pgpool_tx_test SET balance = balance + 10 WHERE id = 1";
+        }
+
+        bool success = pgpool_execute(conn, query1, 5000) && pgpool_execute(conn, query2, 5000);
+
+        if (success) {
+            // Intentionally rollback 10% of the transactions to verify rollback behavior
+            if (i % 10 == 9) {
+                if (!pgpool_rollback(conn, 5000)) {
+                    fprintf(stderr, "[TX Worker %d] ROLLBACK failed: %s\n", args->thread_id,
+                            pgpool_error_message(conn));
+                }
+            } else {
+                if (!pgpool_commit(conn, 5000)) {
+                    fprintf(stderr, "[TX Worker %d] COMMIT failed: %s\n", args->thread_id, pgpool_error_message(conn));
+                }
+            }
+        } else {
+            // Rollback on execution error
+            pgpool_rollback(conn, 5000);
+        }
+
+        pgpool_release(args->pool, conn);
+
+        // Brief sleep to yield control and mix execution order
+        usleep(10000);  // 10ms
+    }
+
+    return NULL;
+}
+
+static void test_multithreaded_transactions(const char* conninfo) {
+    printf("\n=== MULTITHREADED TRANSACTION TEST ===\n");
+    printf("Simulating concurrent balance transfers using a connection pool...\n");
+
+    pgpool_config_t config = {
+        .conninfo = conninfo,
+        .min_connections = 4,
+        .max_connections = 8,
+        .connect_timeout = 5,
+        .auto_reconnect = true,
+        .connection_init = NULL,
+        .connection_close = NULL,
+    };
+
+    pgpool_t* pool = pgpool_create(&config);
+    if (!pool) {
+        fprintf(stderr, "Failed to create connection pool\n");
+        return;
+    }
+
+    // Set up database table structure
+    pgconn_t* conn = pgpool_acquire(pool, 5000);
+    if (!conn) {
+        fprintf(stderr, "Failed to acquire setup connection\n");
+        pgpool_destroy(pool, 1000);
+        return;
+    }
+
+    pgpool_execute(conn, "DROP TABLE IF EXISTS pgpool_tx_test", 5000);
+    if (!pgpool_execute(conn, "CREATE TABLE pgpool_tx_test (id INT PRIMARY KEY, balance INT)", 5000)) {
+        fprintf(stderr, "Failed to create test table: %s\n", pgpool_error_message(conn));
+        pgpool_release(pool, conn);
+        pgpool_destroy(pool, 1000);
+        return;
+    }
+
+    pgpool_execute(conn, "INSERT INTO pgpool_tx_test (id, balance) VALUES (1, 500), (2, 500)", 5000);
+    pgpool_release(pool, conn);
+
+    printf("Table 'pgpool_tx_test' created. Initial balances: ID 1 = $500, ID 2 = $500. Total = $1000.\n");
+
+#define NUM_TX_THREADS        4
+#define ITERATIONS_PER_THREAD 30
+    pthread_t threads[NUM_TX_THREADS];
+    tx_worker_args_t thread_args[NUM_TX_THREADS];
+
+    printf("Spawning %d threads, each executing %d transfer operations...\n", NUM_TX_THREADS, ITERATIONS_PER_THREAD);
+
+    for (int i = 0; i < NUM_TX_THREADS; i++) {
+        thread_args[i].pool = pool;
+        thread_args[i].thread_id = i;
+        thread_args[i].iterations = ITERATIONS_PER_THREAD;
+        pthread_create(&threads[i], NULL, tx_worker_thread, &thread_args[i]);
+    }
+
+    for (int i = 0; i < NUM_TX_THREADS; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    // Acquire connection to evaluate test results
+    conn = pgpool_acquire(pool, 5000);
+    if (conn) {
+        PGresult* res = pgpool_query(conn, "SELECT id, balance FROM pgpool_tx_test ORDER BY id", 5000);
+        if (res && PQntuples(res) >= 2) {
+            int b1 = atoi(PQgetvalue(res, 0, 1));
+            int b2 = atoi(PQgetvalue(res, 1, 1));
+            int total = b1 + b2;
+
+            printf("\nFinal balance check:\n");
+            printf("  Account 1: $%d\n", b1);
+            printf("  Account 2: $%d\n", b2);
+            printf("  Total Sum: $%d (Expected: $1000)\n", total);
+
+            if (total == 1000) {
+                printf("Result: Consistent transaction states maintained.\n");
+            } else {
+                fprintf(stderr, "Result Error: Transaction isolation or rollback anomaly. Balance is %d.\n", total);
+            }
+            PQclear(res);
+        } else {
+            fprintf(stderr, "Failed to query result table: %s\n", pgpool_error_message(conn));
+        }
+
+        pgpool_execute(conn, "DROP TABLE pgpool_tx_test", 5000);
+        pgpool_release(pool, conn);
+    }
+
+    pgpool_destroy(pool, 5000);
+    printf("=== MULTITHREADED TRANSACTION TEST COMPLETE ===\n");
+}
+
+/* =========================================================================
+ * Main Entrypoint
+ * ======================================================================= */
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <conninfo> [--test-forced-shutdown]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <conninfo> [--test-forced-shutdown | --test-multithread-tx]\n", argv[0]);
         fprintf(stderr, "Example: %s \"host=localhost dbname=mydb user=postgres\"\n", argv[0]);
         fprintf(stderr, "\nOptions:\n");
-        fprintf(stderr, "  --test-forced-shutdown  Run forced shutdown simulation\n");
+        fprintf(stderr, "  --test-forced-shutdown   Run forced pool shutdown simulation\n");
+        fprintf(stderr, "  --test-multithread-tx    Run only the multithreaded transaction tests\n");
         return 1;
     }
 
     const char* conninfo = argv[1];
 
-    // Check if forced shutdown test requested
-    if (argc >= 3 && strcmp(argv[2], "--test-forced-shutdown") == 0) {
-        test_forced_shutdown(conninfo);
-        return 0;
+    // Branch to specific test modes if requested
+    if (argc >= 3) {
+        if (strcmp(argv[2], "--test-forced-shutdown") == 0) {
+            test_forced_shutdown(conninfo);
+            return 0;
+        } else if (strcmp(argv[2], "--test-multithread-tx") == 0) {
+            test_multithreaded_transactions(conninfo);
+            return 0;
+        }
     }
 
     // ===== Normal Operation Tests =====
 
     // Configure the pool
     pgpool_config_t config = {
-        .conninfo         = conninfo,
-        .min_connections  = 2,
-        .max_connections  = 10,
-        .connect_timeout  = 5,
-        .auto_reconnect   = true,
-        .connection_init  = NULL,
+        .conninfo = conninfo,
+        .min_connections = 2,
+        .max_connections = 10,
+        .connect_timeout = 5,
+        .auto_reconnect = true,
+        .connection_init = NULL,
         .connection_close = NULL,
     };
 
@@ -204,7 +369,6 @@ int main(int argc, char* argv[]) {
     printf("\n--- Testing Simple Query ---\n");
     PGresult* res = pgpool_query(conn, "SELECT version()", 5000);
     if (res) {
-        // No need to check status - pgpool_query already verified it
         printf("PostgreSQL Version: %s\n", PQgetvalue(res, 0, 0));
         PQclear(res);
     } else {
@@ -214,9 +378,8 @@ int main(int argc, char* argv[]) {
     // Test parameterized query
     printf("\n--- Testing Parameterized Query ---\n");
     const char* params[] = {"test_value"};
-    res                  = pgpool_query_params(conn, "SELECT $1::text as value", 1, params, 5000);
+    res = pgpool_query_params(conn, "SELECT $1::text as value", 1, params, 5000);
     if (res) {
-        // No need to check status - already verified
         printf("Returned value: %s\n", PQgetvalue(res, 0, 0));
         PQclear(res);
     } else {
@@ -229,9 +392,8 @@ int main(int argc, char* argv[]) {
         printf("Statement prepared successfully\n");
 
         const char* sum_params[] = {"10", "20"};
-        res                      = pgpool_execute_prepared(conn, "test_stmt", 2, sum_params, 5000);
+        res = pgpool_execute_prepared(conn, "test_stmt", 2, sum_params, 5000);
         if (res) {
-            // No need to check status - already verified
             printf("Sum result: %s\n", PQgetvalue(res, 0, 0));
             PQclear(res);
         }
@@ -240,7 +402,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Test transaction
-    printf("\n--- Testing Transaction ---\n");
+    printf("\n--- Testing Single-threaded Transaction ---\n");
     if (pgpool_begin(conn, 5000)) {
         printf("Transaction started\n");
 
@@ -254,7 +416,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Select created_at from users table
+    // Select created_at from users table if available
     res = pgpool_query(conn, "SELECT created_at FROM users LIMIT 10", -1);
     if (res) {
         int n = PQntuples(res);
@@ -263,7 +425,7 @@ int main(int argc, char* argv[]) {
         for (int i = 0; i < n; i++) {
             char buf[64];
             const char* val = PQgetvalue(res, i, 0);
-            xtime_t dt      = pg_get_timestamp(res, i, 0, &valid);
+            xtime_t dt = pg_get_timestamp(res, i, 0, &valid);
             xtime_format(&dt, XTIME_FMT_POSTGRES_TZ, buf, sizeof(buf));
             printf("Formatted: %s, Original: %s\n", buf, val);
         }
@@ -276,8 +438,12 @@ int main(int argc, char* argv[]) {
     printf("Idle connections: %zu\n", pgpool_idle_connections(pool));
     printf("Active connections: %zu\n", pgpool_active_connections(pool));
 
-    // Cleanup
+    // Cleanup first pool session
     pgpool_destroy(pool, 5000);
     printf("\nPool destroyed\n");
+
+    // Execute multithreaded transaction validation
+    test_multithreaded_transactions(conninfo);
+
     return 0;
 }
